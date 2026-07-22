@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 import json
 
@@ -6,10 +7,10 @@ app = FastAPI(title="Multi-ID Resolver API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Permite a cualquiera (incluido RapidAPI) conectar
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Permite GET, POST, etc.
-    allow_headers=["*"],  # Permite cualquier cabecera
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 def get_db():
@@ -37,13 +38,11 @@ def resolve_id(type: str = Query(..., description="movie o series"), source: str
     if not row:
         raise HTTPException(status_code=404, detail="No encontrada")
 
-    # Si el campo extra tiene algo, lo convertimos de texto a lista de Python.
-    # Si está vacío, dejamos una lista vacía []
     links = []
     if row["extra"]:
         try:
             links = json.loads(row["extra"])
-            if not isinstance(links, list): # Por seguridad, nos aseguramos de que es una lista
+            if not isinstance(links, list):
                 links = []
         except:
             links = []
@@ -58,8 +57,8 @@ def resolve_id(type: str = Query(..., description="movie o series"), source: str
             "filmaffinity": row["filmaffinity"],
             "sensacine": row["sensacine"],
             "cine_com": row["cine_com"],
-            "rotten_tomatoes": row["rotten_tomatoes"], # NUEVO
-            "tvinsider": row["tvinsider"]              # NUEVO
+            "rotten_tomatoes": row["rotten_tomatoes"], 
+            "tvinsider": row["tvinsider"]
         },
-        "reference_links": links # <-- Aquí devolvemos la lista de URLs
+        "reference_links": links
     }
