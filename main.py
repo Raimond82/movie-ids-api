@@ -4,6 +4,14 @@ import json
 
 app = FastAPI(title="Multi-ID Resolver API", version="1.0.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permite a cualquiera (incluido RapidAPI) conectar
+    allow_credentials=True,
+    allow_methods=["*"],  # Permite GET, POST, etc.
+    allow_headers=["*"],  # Permite cualquier cabecera
+)
+
 def get_db():
     conn = sqlite3.connect("database.db")
     conn.row_factory = sqlite3.Row
