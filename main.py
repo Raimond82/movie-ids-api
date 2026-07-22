@@ -57,7 +57,8 @@ def formatear_resultado(type: str, row, fields: str) -> dict:
     response = {
         "type": type,
         "title": row["title"],
-        "year": row["year"] # Asumiendo que ya añadiste este campo a la DB
+        "year": row["year"],
+        "year_end": row["year_end"]
     }
 
     if fields == "all":
