@@ -49,7 +49,9 @@ def resolve_id(type: str = Query(..., description="movie o series"), source: str
             "tmdb": row["tmdb"],
             "filmaffinity": row["filmaffinity"],
             "sensacine": row["sensacine"],
-            "cine_com": row["cine_com"]
+            "cine_com": row["cine_com"],
+            "rotten_tomatoes": row["rotten_tomatoes"], # NUEVO
+            "tvinsider": row["tvinsider"]              # NUEVO
         },
         "reference_links": links # <-- Aquí devolvemos la lista de URLs
     }
