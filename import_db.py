@@ -8,7 +8,7 @@ def importar_datos(archivo_json, archivo_db):
     conn = sqlite3.connect(archivo_db)
     cursor = conn.cursor()
 
-    # 1. Crear tabla principal
+    # 1. Crear tabla principal (EXACTAMENTE con estas columnas)
     cursor.execute("DROP TABLE IF EXISTS media")
     cursor.execute('''
         CREATE TABLE media (
@@ -40,7 +40,7 @@ def importar_datos(archivo_json, archivo_db):
         )
     ''')
 
-    # 3. Crear índices clave
+    # 3. Índices
     cursor.execute("CREATE INDEX idx_type_imdb ON media(type, imdb)")
     cursor.execute("CREATE INDEX idx_type_tmdb ON media(type, tmdb)")
     cursor.execute("CREATE INDEX idx_type_fa ON media(type, filmaffinity)")
@@ -54,37 +54,33 @@ def importar_datos(archivo_json, archivo_db):
     akas_a_insertar = []
 
     for item in datos:
-        # Insertar en Media
         cursor.execute('''
             INSERT INTO media (type, title, year, year_end, imdb, tmdb, filmaffinity, sensacine, cine_com, rotten_tomatoes, metacritic, extra, redes)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            item['type'], item['title'], item['year'], item['year_end'], 
-            item['imdb'], item['tmdb'], item['filmaffinity'], item['sensacine'],
-            item['cine_com'], item['rotten_tomatoes'], item['metacritic'], 
-            item['extra'], item['redes']
+            item.get('type'), item.get('title'), item.get('year'), item.get('year_end'), 
+            item.get('imdb'), item.get('tmdb'), item.get('filmaffinity'), item.get('sensacine'),
+            item.get('cine_com'), item.get('rotten_tomatoes'), item.get('metacritic'), 
+            item.get('extra', '[]'), item.get('redes', '[]')
         ))
         
-        # Obtener el ID que acaba de generar SQLite
         current_media_id = cursor.lastrowid
         registros_insertados += 1
 
-        # Preparar AKAs para insertar en bloque
         akas_list = item.get('akas', [])
         if isinstance(akas_list, str):
             akas_list = json.loads(akas_list)
             
         for titulo_aka in akas_list:
-            if titulo_aka: # Que no esté vacío
+            if titulo_aka: 
                 akas_a_insertar.append((current_media_id, titulo_aka))
 
-    # 5. Insertar todos los AKAs de golpe (más rápido)
     if akas_a_insertar:
         cursor.executemany("INSERT INTO akas (media_id, title) VALUES (?, ?)", akas_a_insertar)
 
     conn.commit()
     conn.close()
-    print(f"¡Éxito! {registros_insertados} registros y {len(akas_a_insertar)} AKAs importados en {archivo_db}")
+    print(f"¡Éxito! {registros_insertados} registros y {len(akas_a_insertar)} AKAs importados.")
 
 if __name__ == "__main__":
     importar_datos("datos_api_export.json", "database.db")
