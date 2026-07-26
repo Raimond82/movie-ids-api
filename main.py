@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 import json
 
-app = FastAPI(title="Multi-ID Resolver API", version="1.0.0")
+app = FastAPI(title="Multi-ID Resolver API", version="1.1.0") # Subimos versión
 
 app.add_middleware(
     CORSMiddleware,
@@ -13,7 +13,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- SISTEMA DE CACHÉ ULTRALIGERO ---
+# --- SISTEMA DE CACHÉ ---
 cache_dict = {}
 CACHE_LIMIT = 500
 
@@ -38,49 +38,23 @@ def generar_urls_desde_ids(media_type: str, row) -> list:
     urls_generadas = []
     if row["imdb"]:
         urls_generadas.append(f"https://www.imdb.com/title/{row['imdb']}/")
-        
     if row["tmdb"]:
-        # Ahora TMDB es solo el ID numérico, usamos el tipo de la fila
         tipo_tmdb = "tv" if media_type == "series" else "movie"
         urls_generadas.append(f"https://www.themoviedb.org/{tipo_tmdb}/{row['tmdb']}")
-        
     if row["filmaffinity"]:
         urls_generadas.append(f"https://www.filmaffinity.com/es/{row['filmaffinity']}.html")
     if row["cine_com"]:
         urls_generadas.append(f"https://www.cine.com/pelicula/{row['cine_com']}") 
     return urls_generadas
 
-# --- FUNCIÓN: Formateador de resultados ---
-def formatear_resultado(type: str, row, fields: str) -> dict:
+# --- FUNCIÓN: Formateador dinámico ---
+def formatear_resultado(type: str, row, fields_set: set) -> dict:
     def limpiar(val):
         if val is None or val == "None" or val == "":
             return None
         return val
 
-    identifiers = {
-        "imdb": limpiar(row["imdb"]),
-        "tmdb": limpiar(row["tmdb"]),
-        "filmaffinity": limpiar(row["filmaffinity"]),
-        "sensacine": limpiar(row["sensacine"]),
-        "cine_com": limpiar(row["cine_com"]),
-        "rotten_tomatoes": limpiar(row["rotten_tomatoes"]),
-        "metacritic": limpiar(row["metacritic"]) # NUEVO
-    }
-
-    urls_generadas = generar_urls_desde_ids(type, row)
-    
-    # Fusionamos los 3 orígenes de links: Generados + Extra + Redes
-    all_raw_links = urls_generadas
-    
-    for campo in ['extra', 'redes']:
-        if row[campo]:
-            try:
-                parsed = json.loads(row[campo])
-                if isinstance(parsed, list): all_raw_links.extend(parsed)
-            except: pass
-            
-    all_links = list(set(all_raw_links)) # Eliminamos duplicados
-
+    # Base de la respuesta (siempre se devuelve)
     response = {
         "type": type,
         "title": limpiar(row["title"]),
@@ -88,37 +62,68 @@ def formatear_resultado(type: str, row, fields: str) -> dict:
         "year_end": limpiar(row["year_end"])
     }
 
-    if fields == "all":
-        response["identifiers"] = identifiers
-        response["reference_links"] = all_links
-    elif fields == "ids":
-        response["identifiers"] = identifiers
-    elif fields == "links":
-        response["reference_links"] = all_links
+    # Si el set está vacío, significa que no se pasó el parámetro (devolver todo)
+    devolver_todo = len(fields_set) == 0
+
+    # 1. IDENTIFIERS
+    if devolver_todo or 'ids' in fields_set:
+        response["identifiers"] = {
+            "imdb": limpiar(row["imdb"]),
+            "tmdb": limpiar(row["tmdb"]),
+            "filmaffinity": limpiar(row["filmaffinity"]),
+            "sensacine": limpiar(row["sensacine"]),
+            "cine_com": limpiar(row["cine_com"]),
+            "rotten_tomatoes": limpiar(row["rotten_tomatoes"]),
+            "metacritic": limpiar(row["metacritic"])
+        }
+
+    # 2. REFERENCE LINKS (URLs de webs + campo extra)
+    if devolver_todo or 'links' in fields_set:
+        urls_generadas = generar_urls_desde_ids(type, row)
+        extra_links = []
+        if row["extra"]:
+            try:
+                parsed = json.loads(row["extra"])
+                if isinstance(parsed, list): extra_links.extend(parsed)
+            except: pass
+        response["reference_links"] = list(set(urls_generadas + extra_links))
+
+    # 3. SOCIAL LINKS (Campo redes)
+    if devolver_todo or 'social' in fields_set:
+        social_links = []
+        if row["redes"]:
+            try:
+                parsed = json.loads(row["redes"])
+                if isinstance(parsed, list): social_links = parsed
+            except: pass
+        response["social_links"] = social_links
 
     return response
 
-# =========================================================
-# ENDPOINT 0: HEALTH CHECK
 # =========================================================
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "Multi-ID Resolver API is running"}
 
 # =========================================================
-# ENDPOINT 1: RESOLVER POR ID
-# =========================================================
 @app.get("/v1/resolve")
 def resolve_id(
     type: str = Query(..., description="movie o series"), 
     source: str = Query(..., description="imdb, tmdb, filmaffinity, sensacine, cine_com, rotten_tomatoes, metacritic"), 
     id: str = Query(...),
-    fields: str = Query("all", description="Qué devolver: 'all', 'ids' o 'links'")
+    fields: str = Query("", description="Lista separada por comas: 'ids,links,social'. Vacío devuelve todo.")
 ):
     valid_sources = ["imdb", "tmdb", "filmaffinity", "sensacine", "cine_com", "rotten_tomatoes", "metacritic"]
     if source not in valid_sources: raise HTTPException(status_code=400, detail="Fuente no válida")
     if type not in ["movie", "series"]: raise HTTPException(status_code=400, detail="Tipo no válido")
-    if fields not in ["all", "ids", "links"]: raise HTTPException(status_code=400, detail="El parámetro 'fields' debe ser: all, ids o links")
+
+    # NUEVA LÓGICA DE VALIDACIÓN DE FIELDS
+    valid_fields = {"ids", "links", "social"}
+    fields_list = [f.strip().lower() for f in fields.split(',') if f.strip()]
+    invalid = set(fields_list) - valid_fields
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Campos no válidos en 'fields': {', '.join(invalid)}. Opciones: ids, links, social")
+    fields_set = set(fields_list)
 
     cache_key = get_cache_key(locals())
     cached_data = get_from_cache(cache_key)
@@ -136,24 +141,29 @@ def resolve_id(
     response = {
         "success": True,
         "query": {"type": type, "source": source, "id": id},
-        "data": formatear_resultado(type, row, fields)
+        "data": formatear_resultado(type, row, fields_set)
     }
     set_in_cache(cache_key, response)
     return response
 
 # =========================================================
-# ENDPOINT 2: BUSCAR POR TÍTULO Y AÑO (USANDO LA TABLA AKAS)
-# =========================================================
 @app.get("/v1/search")
 def search_by_title(
-    title: str = Query(..., description="Título a buscar (busca en títulos alternativos)"),
+    title: str = Query(..., description="Título a buscar (busca en akas)"),
     type: str = Query(None, description="Opcional: 'movie' o 'series'"),
     year: int = Query(None, description="Opcional: año de referencia (margen +-1)"),
-    fields: str = Query("all", description="Qué devolver: 'all', 'ids' o 'links'"),
+    fields: str = Query("", description="Lista separada por comas: 'ids,links,social'. Vacío devuelve todo."),
     limit: int = Query(10, description="Resultados por página (máx 50)"),
     offset: int = Query(0, description="Para paginar: 0, 10, 20...")
 ):
-    if fields not in ["all", "ids", "links"]: raise HTTPException(status_code=400, detail="El parámetro 'fields' debe ser: all, ids o links")
+    # NUEVA LÓGICA DE VALIDACIÓN DE FIELDS
+    valid_fields = {"ids", "links", "social"}
+    fields_list = [f.strip().lower() for f in fields.split(',') if f.strip()]
+    invalid = set(fields_list) - valid_fields
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Campos no válidos en 'fields': {', '.join(invalid)}. Opciones: ids, links, social")
+    fields_set = set(fields_list)
+    
     limit = min(limit, 50)
 
     cache_key = get_cache_key(locals())
@@ -163,8 +173,6 @@ def search_by_title(
     db = get_db()
     cursor = db.cursor()
     
-    # --- LA NUEVA LÓGICA DE BÚSQUEDA ---
-    # Usamos DISTINCT porque una peli puede tener 5 akas y no queremos devolverla 5 veces
     query = """
         SELECT DISTINCT media.* FROM media 
         JOIN akas ON media.id = akas.media_id 
@@ -180,7 +188,6 @@ def search_by_title(
     if year:
         year_min = year - 1
         year_max = year + 1
-        
         if type == "movie":
             query += " AND media.year BETWEEN ? AND ?"
             params.extend([year_min, year_max])
@@ -203,7 +210,7 @@ def search_by_title(
 
     resultados = []
     for row in rows:
-        resultados.append(formatear_resultado(row["type"], row, fields))
+        resultados.append(formatear_resultado(row["type"], row, fields_set))
 
     response = {
         "success": True,
