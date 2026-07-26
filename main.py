@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 import json
 
-app = FastAPI(title="Multi-ID Resolver API", version="2.0.0")
+app = FastAPI(title="Multi-ID Resolver API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,6 +12,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- SISTEMA DE CACHÉ ULTRALIGERO ---
+cache_dict = {}
+CACHE_LIMIT = 500
+
+def get_cache_key(query_params):
+    return json.dumps(query_params, sort_keys=True)
+
+def get_from_cache(key):
+    return cache_dict.get(key)
+
+def set_in_cache(key, value):
+    if len(cache_dict) >= CACHE_LIMIT:
+        cache_dict.pop(next(iter(cache_dict)))
+    cache_dict[key] = value
 
 def get_db():
     conn = sqlite3.connect("database.db")
@@ -23,42 +38,54 @@ def generar_urls_desde_ids(media_type: str, row) -> list:
     urls_generadas = []
     if row["imdb"]:
         urls_generadas.append(f"https://www.imdb.com/title/{row['imdb']}/")
+        
     if row["tmdb"]:
+        # Ahora TMDB es solo el ID numérico, usamos el tipo de la fila
         tipo_tmdb = "tv" if media_type == "series" else "movie"
         urls_generadas.append(f"https://www.themoviedb.org/{tipo_tmdb}/{row['tmdb']}")
+        
     if row["filmaffinity"]:
         urls_generadas.append(f"https://www.filmaffinity.com/es/{row['filmaffinity']}.html")
     if row["cine_com"]:
         urls_generadas.append(f"https://www.cine.com/pelicula/{row['cine_com']}") 
     return urls_generadas
 
-# --- FUNCIÓN NUEVA: Formateador de resultados (Para no repetir código) ---
+# --- FUNCIÓN: Formateador de resultados ---
 def formatear_resultado(type: str, row, fields: str) -> dict:
+    def limpiar(val):
+        if val is None or val == "None" or val == "":
+            return None
+        return val
+
     identifiers = {
-        "imdb": row["imdb"],
-        "tmdb": row["tmdb"],
-        "filmaffinity": row["filmaffinity"],
-        "sensacine": row["sensacine"],
-        "cine_com": row["cine_com"],
-        "rotten_tomatoes": row["rotten_tomatoes"],
-        "tvinsider": row["tvinsider"]
+        "imdb": limpiar(row["imdb"]),
+        "tmdb": limpiar(row["tmdb"]),
+        "filmaffinity": limpiar(row["filmaffinity"]),
+        "sensacine": limpiar(row["sensacine"]),
+        "cine_com": limpiar(row["cine_com"]),
+        "rotten_tomatoes": limpiar(row["rotten_tomatoes"]),
+        "metacritic": limpiar(row["metacritic"]) # NUEVO
     }
 
     urls_generadas = generar_urls_desde_ids(type, row)
-    extra_links = []
-    if row["extra"]:
-        try:
-            extra_links = json.loads(row["extra"])
-            if not isinstance(extra_links, list): extra_links = []
-        except: extra_links = []
+    
+    # Fusionamos los 3 orígenes de links: Generados + Extra + Redes
+    all_raw_links = urls_generadas
+    
+    for campo in ['extra', 'redes']:
+        if row[campo]:
+            try:
+                parsed = json.loads(row[campo])
+                if isinstance(parsed, list): all_raw_links.extend(parsed)
+            except: pass
             
-    all_links = list(set(urls_generadas + extra_links))
+    all_links = list(set(all_raw_links)) # Eliminamos duplicados
 
     response = {
         "type": type,
-        "title": row["title"],
-        "year": row["year"],
-        "year_end": row["year_end"]
+        "title": limpiar(row["title"]),
+        "year": limpiar(row["year"]),
+        "year_end": limpiar(row["year_end"])
     }
 
     if fields == "all":
@@ -72,19 +99,30 @@ def formatear_resultado(type: str, row, fields: str) -> dict:
     return response
 
 # =========================================================
-# ENDPOINT 1: RESOLVER POR ID (El que ya teníamos)
+# ENDPOINT 0: HEALTH CHECK
+# =========================================================
+@app.get("/")
+def health_check():
+    return {"status": "ok", "message": "Multi-ID Resolver API is running"}
+
+# =========================================================
+# ENDPOINT 1: RESOLVER POR ID
 # =========================================================
 @app.get("/v1/resolve")
 def resolve_id(
     type: str = Query(..., description="movie o series"), 
-    source: str = Query(..., description="imdb, tmdb, filmaffinity, sensacine, cine_com"), 
+    source: str = Query(..., description="imdb, tmdb, filmaffinity, sensacine, cine_com, rotten_tomatoes, metacritic"), 
     id: str = Query(...),
     fields: str = Query("all", description="Qué devolver: 'all', 'ids' o 'links'")
 ):
-    valid_sources = ["imdb", "tmdb", "filmaffinity", "sensacine", "cine_com"]
+    valid_sources = ["imdb", "tmdb", "filmaffinity", "sensacine", "cine_com", "rotten_tomatoes", "metacritic"]
     if source not in valid_sources: raise HTTPException(status_code=400, detail="Fuente no válida")
     if type not in ["movie", "series"]: raise HTTPException(status_code=400, detail="Tipo no válido")
     if fields not in ["all", "ids", "links"]: raise HTTPException(status_code=400, detail="El parámetro 'fields' debe ser: all, ids o links")
+
+    cache_key = get_cache_key(locals())
+    cached_data = get_from_cache(cache_key)
+    if cached_data: return cached_data
 
     db = get_db()
     cursor = db.cursor()
@@ -95,34 +133,48 @@ def resolve_id(
 
     if not row: raise HTTPException(status_code=404, detail="No encontrada")
 
-    return {
+    response = {
         "success": True,
         "query": {"type": type, "source": source, "id": id},
         "data": formatear_resultado(type, row, fields)
     }
+    set_in_cache(cache_key, response)
+    return response
 
 # =========================================================
-# ENDPOINT 2: BUSCAR POR TÍTULO Y AÑO (Actualizado)
+# ENDPOINT 2: BUSCAR POR TÍTULO Y AÑO (USANDO LA TABLA AKAS)
 # =========================================================
 @app.get("/v1/search")
 def search_by_title(
-    title: str = Query(..., description="Título a buscar (coincidencias parciales)"),
-    type: str = Query(None, description="Opcional: filtrar por 'movie' o 'series'"),
-    year: int = Query(None, description="Opcional: año de referencia (aplica margen +-1)"),
+    title: str = Query(..., description="Título a buscar (busca en títulos alternativos)"),
+    type: str = Query(None, description="Opcional: 'movie' o 'series'"),
+    year: int = Query(None, description="Opcional: año de referencia (margen +-1)"),
     fields: str = Query("all", description="Qué devolver: 'all', 'ids' o 'links'"),
-    limit: int = Query(10, description="Máximo número de resultados a devolver")
+    limit: int = Query(10, description="Resultados por página (máx 50)"),
+    offset: int = Query(0, description="Para paginar: 0, 10, 20...")
 ):
     if fields not in ["all", "ids", "links"]: raise HTTPException(status_code=400, detail="El parámetro 'fields' debe ser: all, ids o links")
+    limit = min(limit, 50)
+
+    cache_key = get_cache_key(locals())
+    cached_data = get_from_cache(cache_key)
+    if cached_data: return cached_data
 
     db = get_db()
     cursor = db.cursor()
     
-    query = "SELECT * FROM media WHERE title LIKE ?"
+    # --- LA NUEVA LÓGICA DE BÚSQUEDA ---
+    # Usamos DISTINCT porque una peli puede tener 5 akas y no queremos devolverla 5 veces
+    query = """
+        SELECT DISTINCT media.* FROM media 
+        JOIN akas ON media.id = akas.media_id 
+        WHERE akas.title LIKE ?
+    """
     params = [f"%{title}%"]
 
     if type:
         if type not in ["movie", "series"]: raise HTTPException(status_code=400, detail="Tipo no válido")
-        query += " AND type = ?"
+        query += " AND media.type = ?"
         params.append(type)
         
     if year:
@@ -130,38 +182,34 @@ def search_by_title(
         year_max = year + 1
         
         if type == "movie":
-            # Películas: el año debe estar dentro del margen
-            query += " AND year BETWEEN ? AND ?"
+            query += " AND media.year BETWEEN ? AND ?"
             params.extend([year_min, year_max])
-            
         elif type == "series":
-            # Series: el rango de búsqueda (year_min - year_max) debe solaparse con el rango de la serie (year - year_end)
-            # Lógica: La serie empieza antes o en year_max, Y (termina después o en year_min, O sigue emitiéndose)
-            query += " AND year <= ? AND (year_end IS NULL OR year_end >= ?)"
+            query += " AND media.year <= ? AND (media.year_end IS NULL OR media.year_end >= ?)"
             params.extend([year_max, year_min])
-            
         else:
-            # Si NO se especificó el tipo, mezclamos ambas lógicas con un OR
-            query += " AND ( (type='movie' AND year BETWEEN ? AND ?) OR (type='series' AND year <= ? AND (year_end IS NULL OR year_end >= ?)) )"
+            query += " AND ( (media.type='movie' AND media.year BETWEEN ? AND ?) OR (media.type='series' AND media.year <= ? AND (media.year_end IS NULL OR media.year_end >= ?)) )"
             params.extend([year_min, year_max, year_max, year_min])
 
-    query += " LIMIT ?"
-    params.append(limit)
+    query += " LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
 
     cursor.execute(query, params)
     rows = cursor.fetchall()
     db.close()
 
     if not rows:
-        raise HTTPException(status_code=404, detail="No se encontraron resultados para esa búsqueda")
+        raise HTTPException(status_code=404, detail="No se encontraron resultados")
 
     resultados = []
     for row in rows:
         resultados.append(formatear_resultado(row["type"], row, fields))
 
-    return {
+    response = {
         "success": True,
-        "query": {"title": title, "type": type, "year": year},
+        "query": {"title": title, "type": type, "year": year, "limit": limit, "offset": offset},
         "total_results": len(resultados),
         "data": resultados
     }
+    set_in_cache(cache_key, response)
+    return response
