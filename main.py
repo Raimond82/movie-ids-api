@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 import json
@@ -101,8 +101,12 @@ def formatear_resultado(type: str, row, fields_set: set) -> dict:
     return response
 
 # =========================================================
-@app.get("/")
-def health_check():
+@app.api_route("/", methods=["GET", "HEAD"])
+def health_check(request: Request):
+    if request.method == "HEAD":
+        # Si UptimeRobot pide HEAD, le damos un 200 vacío sin gastar memoria
+        return Response(status_code=200)
+    # Si es un GET normal, devolvemos el JSON
     return {"status": "ok", "message": "Multi-ID Resolver API is running"}
 
 # =========================================================
