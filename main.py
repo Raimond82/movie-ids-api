@@ -125,7 +125,7 @@ def resolve_id(
         raise HTTPException(status_code=400, detail=f"Campos no válidos en 'fields': {', '.join(invalid)}. Opciones: ids, links, social")
     fields_set = set(fields_list)
 
-    cache_key = get_cache_key(locals())
+    cache_key = get_cache_key({"type": type, "source": source, "id": id, "fields": fields})
     cached_data = get_from_cache(cache_key)
     if cached_data: return cached_data
 
@@ -166,7 +166,7 @@ def search_by_title(
     
     limit = min(limit, 50)
 
-    cache_key = get_cache_key(locals())
+    cache_key = get_cache_key({"title": title, "type": type, "year": year, "fields": fields, "limit": limit, "offset": offset})
     cached_data = get_from_cache(cache_key)
     if cached_data: return cached_data
 
